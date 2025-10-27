@@ -1,0 +1,151 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require "pathname"
+
+# Load the library
+$LOAD_PATH.unshift File.expand_path("../lib", __dir__)
+require "auto/l18n"
+
+options = {
+  directory: nil,
+  recursive: false,
+  exts: [".html.erb"],
+  mode: "find", # find or replace
+  locale_path: "config/locales/en.yml",
+  namespace: nil,
+  dry_run: false,
+  backup: true
+}
+
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: bundle exec auto-l18n [options] [file]"
+
+  opts.on("-dDIR", "--directory=DIR", "Search files in DIR instead of a single file") do |d|
+    options[:directory] = d
+  end
+
+  opts.on("-r", "--recursive", "When used with --directory, search recursively") do
+    options[:recursive] = true
+  end
+
+  opts.on("--ext=EXTS", "Comma-separated list of extensions to scan (default: .html.erb)") do |e|
+    options[:exts] = e.split(",").map(&:strip)
+  end
+
+  opts.on("--replace", "Replace hardcoded text with I18n calls (default is to only find)") do
+    options[:mode] = "replace"
+  end
+
+  opts.on("--locale-path=PATH", "Path to locale file (default: config/locales/en.yml)") do |path|
+    options[:locale_path] = path
+  end
+
+  opts.on("--namespace=NS", "Namespace for translation keys (e.g., views.posts)") do |ns|
+    options[:namespace] = ns
+  end
+
+  opts.on("--dry-run", "Preview changes without modifying files") do
+    options[:dry_run] = true
+  end
+
+  opts.on("--no-backup", "Don't create backup files") do
+    options[:backup] = false
+  end
+
+  opts.on("-h", "--help", "Show this help message") do
+    puts opts
+    exit
+  end
+end
+
+parser.parse!(ARGV)
+
+paths = []
+
+  if options[:directory]
+  dir = Pathname.new(options[:directory])
+  unless dir.directory?
+    STDERR.puts "Directory not found: #{dir}"
+    exit 1
+  end
+
+  if options[:recursive]
+    all = Dir.glob(File.join(dir.to_s, "**", "*"), File::FNM_DOTMATCH).select { |p| File.file?(p) }
+  else
+    all = Dir.children(dir.to_s).map { |c| File.join(dir.to_s, c) }.select { |p| File.file?(p) }
+  end
+
+  # Filter by extensions
+  exts = options[:exts].map { |x| x.start_with?('.') ? x : ".#{x}" }
+  paths = all.select { |p| exts.include?(File.extname(p)) || exts.any? { |e| p.end_with?(e) } }
+elsif ARGV[0]
+  # single file path provided
+  file = ARGV[0]
+  unless File.file?(file)
+    STDERR.puts "File not found: #{file}"
+    exit 1
+  end
+  paths = [file]
+else
+  # default: current directory, non-recursive
+  all = Dir.children(Dir.pwd).map { |c| File.join(Dir.pwd, c) }.select { |p| File.file?(p) }
+  exts = options[:exts].map { |x| x.start_with?('.') ? x : ".#{x}" }
+  paths = all.select { |p| exts.include?(File.extname(p)) || exts.any? { |e| p.end_with?(e) } }
+end
+
+if paths.empty?
+  puts "No files found to scan."
+  exit 0
+end
+
+if options[:mode] == "find"
+  # Original behavior: find and list hardcoded text
+  total = 0
+  paths.each do |p|
+    found = Auto::L18n.find_text(p)
+    next if found.empty?
+
+    total += found.size
+    puts "\nFile: #{p}"
+    found.each do |s|
+      puts "  - #{s}"
+    end
+  end
+
+  puts "\nFound #{total} text occurrence#{'s' if total != 1}."
+else
+  # New behavior: replace hardcoded text with I18n calls
+  puts options[:dry_run] ? "DRY RUN MODE - No files will be modified\n" : "Replacing hardcoded text...\n"
+  
+  total_replaced = 0
+  total_keys = 0
+  
+  paths.each do |p|
+    result = Auto::L18n.exchange_text_for_l18n_placeholder(p, {
+      locale_path: options[:locale_path],
+      namespace: options[:namespace],
+      dry_run: options[:dry_run],
+      backup: options[:backup]
+    })
+    
+    next if result[:replaced] == 0
+    
+    total_replaced += result[:replaced]
+    total_keys += result[:added_keys]
+    
+    puts "\nFile: #{p}"
+    puts "  Replaced: #{result[:replaced]} occurrence(s)"
+    puts "  Added keys: #{result[:added_keys]}"
+    
+    if options[:dry_run] && result[:keys]
+      puts "  Keys that would be added:"
+      result[:keys].each { |k| puts "    - #{k}" }
+    end
+  end
+  
+  puts "\n#{options[:dry_run] ? 'Would replace' : 'Replaced'} #{total_replaced} occurrence(s) across #{paths.size} file(s)."
+  puts "#{options[:dry_run] ? 'Would add' : 'Added'} #{total_keys} translation key(s) to #{options[:locale_path]}."
+  puts "\nBackup files created with .backup extension." if !options[:dry_run] && options[:backup] && total_replaced > 0
+end
