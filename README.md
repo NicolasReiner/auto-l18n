@@ -50,7 +50,7 @@ texts.each { |t| puts "- #{t}" }
 # Preview changes (dry run)
 result = Auto::L18n.auto_internationalize(
   "app/views/posts/show.html.erb",
-  namespace: "views.posts.show",
+  # namespace: "views.posts.show", # Optional – will be derived from the file path if omitted
   dry_run: true
 )
 
@@ -58,8 +58,7 @@ puts "Would replace #{result[:total_replaced]} strings"
 
 # Apply changes
 result = Auto::L18n.auto_internationalize(
-  "app/views/posts/show.html.erb",
-  namespace: "views.posts.show"
+  "app/views/posts/show.html.erb"
 )
 ```
 
@@ -70,12 +69,13 @@ result = Auto::L18n.auto_internationalize(
 ruby exe/auto-l18n app/views/posts/show.html.erb
 
 # Replace with I18n calls (dry run)
+# Note: If --namespace is omitted, it will be derived from the file path (e.g., app/views/admin/users/show.html.erb -> views.admin.users.show)
 ruby exe/auto-l18n app/views/posts/show.html.erb \
-  --replace --namespace views.posts.show --dry-run
+  --replace --dry-run
 
 # Actually apply changes
 ruby exe/auto-l18n app/views/posts/show.html.erb \
-  --replace --namespace views.posts.show
+  --replace
 ```
 
 ## Example Transformation
@@ -178,7 +178,7 @@ Options:
   --ext=EXTS              File extensions (default: .html.erb)
   --replace               Replace hardcoded text with I18n calls
   --locale-path=PATH      Locale file path (default: config/locales/en.yml)
-  --namespace=NS          Translation key namespace (e.g., views.posts)
+  --namespace=NS          Translation key namespace (e.g., views.posts). If omitted, it is derived from the file path (folder hierarchy).
   --dry-run               Preview changes without modifying files
   --no-backup             Don't create backup files
   -h, --help              Show help

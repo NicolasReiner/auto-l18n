@@ -424,7 +424,7 @@ module Auto
       results
     end
 
-      # Exchange hardcoded text for I18n placeholders
+    # Exchange hardcoded text for I18n placeholders
     # 
     # This method replaces hardcoded strings in a file with I18n translation calls
     # and adds the translations to a locale file (default: en.yml).
@@ -440,7 +440,7 @@ module Auto
     # @option options [Boolean] :backup (true) Create backup files before modifying
     #
     # @return [Hash] Summary of changes made
-    def self.exchange_text_for_l18n_placeholder(path, options = {})
+  def self.exchange_text_for_l18n_placeholder(path, options = {})
       raise ArgumentError, "path must be a String" unless path.is_a?(String)
       raise ArgumentError, "File not found: #{path}" unless File.file?(path)
 
@@ -449,6 +449,9 @@ module Auto
         locale_path: "config/locales/en.yml",
         locale: "en",
         namespace: nil,
+        namespace_from_path: true, # derive namespace from folder/file path when none provided
+        path_root: nil,            # optional root to strip (e.g., "app/views")
+        namespace_prefix: nil,     # optional prefix to prepend (e.g., "views")
         dry_run: false,
         min_length: 2,
         ignore_patterns: [],
@@ -474,9 +477,17 @@ module Auto
       # Process findings in reverse order by position to maintain string positions
       sorted_findings = findings.sort_by { |f| -(f.line || 0) }
       
+      # Determine effective namespace: user-provided or derived from file path
+      effective_namespace = opts[:namespace]
+      if (effective_namespace.nil? || effective_namespace.empty?) && opts[:namespace_from_path]
+        effective_namespace = derive_namespace_from_path(path, opts)
+        # Normalize to nil if empty
+        effective_namespace = nil if effective_namespace.nil? || effective_namespace.empty?
+      end
+
       sorted_findings.each_with_index do |finding, idx|
         # Generate translation key
-        key = generate_translation_key(finding.text, finding.type, opts[:namespace], idx)
+        key = generate_translation_key(finding.text, finding.type, effective_namespace, idx)
         
         # Add to locale file
         set_nested_key(locale_data, key, finding.text, opts[:locale])
@@ -601,6 +612,64 @@ module Auto
       parts << base_key
       
       parts.join('.')
+    end
+
+    # Derive a namespace from the file path, producing a dotted hierarchy
+    # Examples:
+    #  - app/views/admin/users/show.html.erb -> "views.admin.users.show"
+    #  - app/views/posts/index.html.erb -> "views.posts.index"
+    #  - src/templates/home.html.erb (with namespace_prefix: nil) -> "src.templates.home"
+    #  - test/test.html.erb (no root) -> "test.test"
+    def self.derive_namespace_from_path(path, options = {})
+      require 'pathname'
+      abs_path = File.expand_path(path)
+
+      # Resolve root to strip
+      root = options[:path_root]
+      prefix = options[:namespace_prefix]
+
+      # Auto-detect common Rails views root and default prefix
+      if root.nil? && abs_path.include?(File.join('app', 'views'))
+        root = abs_path.split(File.join('app', 'views')).first + File.join('app', 'views')
+        prefix ||= 'views'
+      end
+
+      rel_path = nil
+      if root && abs_path.start_with?(File.expand_path(root) + File::SEPARATOR)
+        rel_path = Pathname.new(abs_path).relative_path_from(Pathname.new(File.expand_path(root))).to_s
+      else
+        # Try relative to current working directory
+        cwd = Dir.pwd
+        if abs_path.start_with?(cwd + File::SEPARATOR)
+          rel_path = abs_path.sub(cwd + File::SEPARATOR, '')
+        else
+          rel_path = File.basename(abs_path)
+        end
+      end
+
+      # Remove all extensions (handle multi-extensions like .html.erb)
+      base = rel_path.dup
+      loop do
+        ext = File.extname(base)
+        break if ext.nil? || ext.empty?
+        base = base.chomp(ext)
+      end
+
+      # Split into segments, normalize, and join with dots
+      segments = base.split(File::SEPARATOR).map do |seg|
+        seg.downcase
+           .gsub(/[^\w\-\.]+/, '_')
+           .gsub(/[\-\.]/, '_')
+           .gsub(/_+/, '_')
+           .gsub(/^_|_$/, '')
+      end.reject(&:empty?)
+
+      derived = segments.join('.')
+      if prefix && !prefix.to_s.empty?
+        [prefix, derived].reject(&:empty?).join('.')
+      else
+        derived
+      end
     end
 
     # Load locale file (YAML)

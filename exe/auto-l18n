@@ -42,7 +42,7 @@ parser = OptionParser.new do |opts|
     options[:locale_path] = path
   end
 
-  opts.on("--namespace=NS", "Namespace for translation keys (e.g., views.posts)") do |ns|
+  opts.on("--namespace=NS", "Namespace for translation keys (e.g., views.posts). If omitted, it is derived from the file path (folder hierarchy).") do |ns|
     options[:namespace] = ns
   end
 
@@ -101,16 +101,47 @@ if paths.empty?
 end
 
 if options[:mode] == "find"
-  # Original behavior: find and list hardcoded text
+  # Find and list hardcoded text; in --dry-run also show the keys that would be used
   total = 0
   paths.each do |p|
     found = Auto::L18n.find_text(p)
     next if found.empty?
 
-    total += found.size
     puts "\nFile: #{p}"
-    found.each do |s|
-      puts "  - #{s}"
+    # List found strings
+    total += found.size
+    found.each { |s| puts "  - #{s}" }
+
+    # In dry-run, show the keys that would be used for replacement
+    if options[:dry_run]
+      structured = Auto::L18n.find_text(p, structured: true)
+      # mimic the sort used by exchange_text_for_l18n_placeholder (by line desc)
+      sorted = structured.sort_by { |f| -(f.line || 0) }
+
+      # Determine effective namespace as in the library code
+      effective_ns = options[:namespace]
+      if (effective_ns.nil? || effective_ns.empty?)
+        # Call private helper via send to derive from path
+        begin
+          effective_ns = Auto::L18n.send(:derive_namespace_from_path, p, {})
+          effective_ns = nil if effective_ns.nil? || effective_ns.empty?
+        rescue NoMethodError
+          # Fallback: no derived namespace available
+          effective_ns = options[:namespace]
+        end
+      end
+
+      keys = sorted.each_with_index.map do |f, idx|
+        begin
+          Auto::L18n.send(:generate_translation_key, f.text, f.type, effective_ns, idx)
+        rescue NoMethodError
+          # Extremely unlikely; just show placeholder when method not accessible
+          "generated_key_#{idx}"
+        end
+      end
+
+      puts "  Keys that would be used:"
+      keys.each { |k| puts "    - #{k}" }
     end
   end
 
