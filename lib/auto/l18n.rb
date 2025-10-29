@@ -64,7 +64,7 @@ module Auto
       record = lambda do |str, type:, source:, original_position: nil|
         return if str.nil?
         
-        # Normalize whitespace
+  # Normalize whitespace
         s = str.gsub(/\s+/, " ").strip
         return if s.empty?
         return if s.length < opts[:min_length]
@@ -85,14 +85,63 @@ module Auto
         # Only skip if multiple curly braces (likely interpolation)
         return if s.scan(/\{/).size > 1 && s.scan(/\}/).size > 1
         
-        # Skip file paths
+        
+        #  - Common field names that often appear as technical tokens rather than UI text
+        return if s.downcase == 'email'
+  # Skip file paths
         return if s =~ %r{\A\.?/?[\w\-]+(/[\w\-\.]+)+\z}
+
+        # Heuristics to avoid common non-translatable strings
+        #  - CSS class/id-like tokens (snake/kebab case, possibly space-separated list)
+        if (s.include?('_') || s.include?('-')) && s =~ /\A[a-z0-9 _\-]+\z/
+          # e.g., "btn btn-secondary", "group_show", "event-link"
+          return
+        end
+
+        #  - CamelCase or lowerCamelCase identifiers (likely variable/ID names)
+        return if s =~ /\A(?:[a-z]+(?:[A-Z][a-z0-9]+)+|[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\z/
+
+        #  - Hex colors like #fff or #4CAF50
+        return if s =~ /\A#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\b/
+
+        #  - File names with extensions (e.g., JA_Logo.png, Chart.bundle)
+        return if s =~ /\A[\w\-]+(\.[A-Za-z0-9]{2,6})+\z/
+
+        #  - Date/time format strings (strftime-style like %Y-%m-%d, %I:%M %p)
+        return if s =~ /%[a-zA-Z]/
+
+  #  - Mostly numeric values (amounts, percentages)
+        return if s =~ /\A\d+(?:[.,]\d+)?(?:%|[a-zA-Z]*)?\z/
+
+  #  - Rails-style parameter names with bracket notation used in form helpers
+  #    e.g., "webhook_event_call[event][]", "permission_ids[]"
+  return if s =~ /\A[a-zA-Z0-9_]+(?:\[[^\]]*\])+(?:\[\])?\z/
+
+  #  - Common developer token seen as IDs/variables but not visible copy
+  return if s == 'breadcrumb'
+
+  #  - MIME types (single or comma-separated), e.g., "image/*", "image/png,image/jpeg"
+  return if s =~ /\A(?:[a-zA-Z0-9.+-]+\/[a-zA-Z0-9+*.-]+)(?:\s*,\s*[a-zA-Z0-9.+-]+\/[a-zA-Z0-9+*.-]+)*\z/
+
+  #  - CSS inline style declarations (property: value; ...)
+  #    Detect at least one property:value; pair
+  return if s =~ /\b[a-zA-Z\-]+\s*:\s*[^;]+;/
         
         # Skip code-like syntax
-        return if s =~ /[;=>]{2,}/ || s =~ /function\s*\(/ || s =~ /\b(?:var|const|let)\s+\w+/
+  return if s =~ /[;=>]{2,}/ || s =~ /function\s*\(/ || s =~ /\b(?:var|const|let)\s+\w+/
+  # Method-call chains typical of JS (e.g., this.form.submit(); or foo.bar())
+  return if s =~ /[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\s*\([^)]*\)\s*;?/
         
         # Normalize quotes for comparison
         normalized = s.tr('""''', %q{"''"})
+
+        # Skip common non-visible tokens that appear as ERB strings (helper options, class toggles)
+        if type == :erb_string
+          # Single lowercase identifier, typical for CSS classes or symbols used in helpers
+          return if s =~ /\A[a-z][a-z0-9_\-]*\z/
+          # Known nav/resource tokens commonly used as classes or symbols
+          return if %w[active members events partners permissions groups].include?(s)
+        end
         
         # Try to estimate line number
         line = estimate_line(original_position, line_map) if original_position
@@ -118,9 +167,40 @@ module Auto
           
           # Skip if it's an I18n call
           next if code =~ /\b(?:I18n\.)?(?:t|translate)\s*\(/
+
+          # Skip asset/helper calls where strings are not visible user text
+          # e.g., stylesheet_link_tag "webhooks", media: "all", "data-turbo-track": "reload"
+          next if code =~ /\b(?:stylesheet_link_tag|javascript_include_tag|javascript_pack_tag|stylesheet_pack_tag|asset_path|image_tag|image_pack_tag|font_path|font_url|asset_url)\b/
+
+          # Skip render calls where string literals represent partial/template names, not visible text
+          # e.g., render 'form', render partial: 'form'
+          next if code =~ /\brender\b/
+
+          # Skip check_box_tag and radio_button_tag: string args are names/values, not visible copy
+          next if code =~ /\b(?:check_box_tag|radio_button_tag)\b/
+
+          # Helper-aware extraction: only consider visible-content helpers
+          # Allow: link_to, button_to, submit_tag, label_tag, content_tag, form builder label/submit
+          helper_in_code = (
+            code =~ /\b(?:link_to|button_to|submit_tag|label_tag|content_tag)\b/ ||
+            code =~ /\b\w+\.(?:label|submit)\b/
+          )
+
+          # If no known content-bearing helper is present, skip extracting strings from this ERB block
+          unless helper_in_code
+            next
+          end
           
           # Extract double-quoted strings
           code.scan(/"((?:[^"\\]|\\.)*)"/m).each do |string_match|
+            # Skip inline conditional class injections like: "calculated" if condition
+            # or other inline if/unless patterns composed solely of a literal
+            next if code.strip =~ /\A["'][a-z0-9 _\-]+["']\s+(?:if|unless)\b/i
+            # Skip option-hash values like: class: "...", id: "...", data: "...", style: "..."
+            literal = string_match[0]
+            escaped_lit = Regexp.escape(literal)
+            next if code =~ /\b[a-zA-Z_]\w*\s*:\s*"#{escaped_lit}"/
+            next if code =~ /"#{escaped_lit}"\s*=>/
             unescaped = string_match[0].gsub(/\\(.)/, '\1')
             record.call(
               unescaped,
@@ -132,6 +212,13 @@ module Auto
           
           # Extract single-quoted strings
           code.scan(/'((?:[^'\\]|\\.)*)'/).each do |string_match|
+            # Skip inline conditional class injections like: 'calculated' if condition
+            next if code.strip =~ /\A["'][a-z0-9 _\-]+["']\s+(?:if|unless)\b/i
+            # Skip option-hash values like: class: '...'
+            literal = string_match[0]
+            escaped_lit = Regexp.escape(literal)
+            next if code =~ /\b[a-zA-Z_]\w*\s*:\s*'#{escaped_lit}'/
+            next if code =~ /'#{escaped_lit}'\s*=>/
             unescaped = string_match[0].gsub(/\\(.)/, '\1')
             record.call(
               unescaped,
@@ -229,10 +316,30 @@ module Auto
       fragment.css(selector).each do |el|
         all_attrs.each do |attr|
           next unless el[attr]
-          
-          # Skip empty values or single characters for 'value' attribute
-          next if attr == 'value' && el[attr].length < 2
-          
+
+          # Skip title attributes (tooltips) per project convention to reduce false positives
+          next if attr == 'title'
+
+          # Special handling for the 'value' attribute:
+          # - Only treat as visible text for input types that display their value as a label
+          #   (submit, button, reset). For all other cases (hidden, text, radio, checkbox,
+          #   option values, etc.) the value is not a visible label and should be ignored.
+          if attr == 'value'
+            tag = el.name.to_s.downcase
+            if tag == 'input'
+              input_type = (el['type'] || '').downcase
+              visible_button_types = %w[submit button reset]
+              # If not a visible button-like input, skip capturing the value
+              next unless visible_button_types.include?(input_type)
+            else
+              # For non-input tags (e.g., option, button), don't treat value as visible label
+              next
+            end
+          end
+
+          # Skip empty values or single characters (after applying 'value' rules above)
+          next if el[attr].strip.length < 2
+
           position = find_position_in_original(el[attr], raw)
           record.call(
             el[attr],
